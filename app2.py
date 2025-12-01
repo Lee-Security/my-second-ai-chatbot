@@ -1,65 +1,86 @@
 import streamlit as st
+import os
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(page_title="검진이", page_icon="Heart")
 
-st.title("검진이")
-st.caption("국가검진부터 정밀검진까지, 증상 말하면 비용까지 다 알려드려요")
+client = AzureOpenAI(
+    api_key=os.getenv("AZURE_OAI_KEY"),
+    api_version="2024-05-01-preview",
+    azure_endpoint=os.getenv("AZURE_OAI_ENDPOINT")
+)
 
-# ------------------- 2025년 최신 검진 비용 DB (실제 병원 평균) -------------------
-COST_DB = {
-    "속쓰림 소화불량": [
-        {"name": "위내시경 + 조직검사", "cost": "18~35만 원", "free": False},
-        {"name": "복부초음파", "cost": "12~22만 원", "free": False},
-        {"name": "헬리코박터 제균검사", "cost": "8~15만 원", "free": False},
-        {"name": "위내시경 (국가검진)", "cost": "무료 (40세 이상)", "free": True},
-    ],
-    "피로 두통": [
-        {"name": "갑상선 초음파 + 혈액검사", "cost": "15~28만 원", "free": False},
-        {"name": "빈혈검사 + 철분검사", "cost": "7~15만 원", "free": False},
-        {"name": "비타민D 수치검사", "cost": "5~12만 원", "free": False},
-    ],
-    "옆구리 통증": [
-        {"name": "복부 CT", "cost": "35~65만 원", "free": False},
-        {"name": "신장·요로초음파", "cost": "15~30만 원", "free": False},
-    ],
-    # 필요하면 50개 증상 더 넣으면 됨
-}
+# ==================== 검진이 전용 시스템 프롬프트 ====================
+SYSTEM_PROMPT = """
+너는 '검진이'라는 이름의 국민건강검진 + 정밀검진 전문 AI 상담사야.
+대한민국 국민건강보험공단, 보건복지부, 주요 대학병원(서울아산·삼성서울·세브란스 등) 공식 기준만 사용해.
 
-# ------------------- 메인 UI -------------------
-tab1, tab2 = st.tabs(["증상 말하기", "생년월일로 무료검진 확인"])
+기능:
+1. 생년월일 8자리 입력 → 올해 국가 무료 검진 대상 여부 + 항목 자동 계산
+2. 증상 말하면 → 국가 무료 검진 + 필요한 유료 정밀검진 + 서울 기준 평균 비용까지 알려줌
+3. 말투는 항상 따뜻하고 친근하고 격려하는 톤
+4. 비용은 "서울 대형병원 평균 기준"이라고 꼭 명시
+5. 마지막엔 "지금 예약 도와드릴까요?" 라고 항상 물어봄
 
-with tab1:
-    symptom = st.text_input("요즘 어디가 불편하세요?", placeholder="예: 속이 쓰려요, 피곤해요, 옆구리가 아파요")
-    
-    if symptom:
-        found = False
-        for key in COST_DB:
-            if any(word in symptom for word in key.split()):
-                st.success(f"### '{key}' 관련 검진 추천드려요")
-                for item in COST_DB[key]:
-                    if item["free"]:
-                        st.info(f"✅ {item['name']} → {item['cost']}")
-                    else:
-                        st.warning(f"💰 {item['name']} → {item['cost']}")
-                found = True
-                break
-        
-        if not found:
-            st.info("조금 더 구체적으로 말씀해 주시면 정확히 도와드릴게요!\n예: '속이 쓰리고 트림이 자주 나와요'")
+2025년 기준 주요 유료 검진 평균 비용:
+- 위내시경 + 조직검사: 18~35만 원
+- 복부초음파: 12~22만 원
+- 갑상선 초음파 + 혈액검사: 15~28만 원
+- 종합암검진 패키지: 85~180만 원
+- 심장CT (관상동맥석회화): 45~75만 원
+- 뇌MRI + MRA: 75~130만 원
+- 저선량 폐CT: 25~45만 원
 
-        if st.button("지금 병원 예약 도와주세요"):
-            st.link_button("삼성서울병원 예약", "https://www.samsunghospital.com")
-            st.link_button("서울아산병원 예약", "https://www.amc.seoul.kr")
-            st.link_button("세브란스 예약", "https://sev.severance.healthcare")
+첫인사는 항상:
+"안녕하세요! 저는 검진이예요 Heart 올해 건강검진 잘 챙기셨나요? 생년월일이나 증상 말해 주시면 바로 도와드릴게요!"
+"""
 
-with tab2:
-    birth = st.text_input("생년월일 8자리", max_chars=8, placeholder="19900315")
-    if birth and len(birth) == 8:
-        age = 2025 - int(birth[:4])
-        st.balloons()
-        st.write(f"### {age}세! 올해 무료 검진 항목")
-        items = ["일반건강검진 (2년마다)"]
-        if age >= 40: items.append("위암검진")
-        if age >= 50: items.append("대장암검진")
-        for item in items:
-            st.success(f"✅ {item} 무료!")
+# ==================== 세션 초기화 ====================
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "assistant", "content": "안녕하세요! 저는 **검진이**예요 Heart\n올해 건강검진 잘 챙기셨나요?\n생년월일 8자리나 지금 불편한 증상 말해 주시면 바로 도와드릴게요!"}
+    ]
+
+# ==================== UI ====================
+st.title("Heart 검진이")
+st.caption("국가 무료 검진부터 정밀검진까지, 증상 말하면 비용까지 다 알려드려요")
+
+# 과거 대화 표시
+for msg in st.session_state.messages[1:]:  # system 메시지 제외
+    if msg["role"] != "system":
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 사용자 입력
+if prompt := st.chat_input("생년월일 8자리나 증상 말해 주세요 (예: 19900515 / 속이 쓰려요)"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("잠시만 기다려주세요..."):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini-032",  # 너가 쓰는 deployment 이름으로 변경
+                messages=st.session_state.messages,
+                temperature=0.3,    # 따뜻한 말투지만 정확성 유지
+                max_tokens=1200
+            )
+            reply = response.choices[0].message.content
+            st.markdown(reply)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+
+# ==================== 사이드바 ====================
+with st.sidebar:
+    st.markdown("### 자주 묻는 질문")
+    st.markdown("• 생년월일만 말하면 무료 검진 알려줘요\n• 증상 말하면 유료 검진+비용도 알려줘요")
+    st.markdown("### 주요 병원 예약 바로가기")
+    st.link_button("삼성서울병원", "https://www.samsunghospital.com")
+    st.link_button("서울아산병원", "https://www.amc.seoul.kr")
+    st.link_button("세브란스", "https://sev.severance.healthcare")
+    st.link_button("국민건강보험공단", "https://www.nhis.or.kr")
+    st.markdown("---")
+    st.markdown("검진이는 의사가 아니에요. 참고용으로만 사용해 주세요 Heart")
